@@ -52,7 +52,7 @@ jobs:
             cp -r app build.gradle settings.gradle gradle.properties _build_android/ 2>/dev/null || true
           fi
 
-      - name: Verify & Self-Heal Android Widget, Theme, Legal Pages & Signing Config
+      - name: Verify & Self-Heal Android Auto-Theme Editorial Widget, Legal Pages & Signing Config
         shell: python3 {0}
         run: |
           import os, textwrap
@@ -66,11 +66,6 @@ jobs:
               "app/src/main/java/com/muneebwanee/trace",
           ]:
               os.makedirs(os.path.join(base, d), exist_ok=True)
-
-          manifest = os.path.join(base, "app/src/main/AndroidManifest.xml")
-          if os.path.exists(manifest):
-              txt = open(manifest, encoding="utf-8").read().replace('package="com.muneebwanee.trace"', '')
-              open(manifest, "w", encoding="utf-8").write(txt)
 
           def write_file(rel_path, content):
               p = os.path.join(base, rel_path)
@@ -103,11 +98,10 @@ jobs:
 
               signingConfigs {
                   release {
-                      def ksPath = System.getenv("ANDROID_KEYSTORE_PATH") ?: "upload-keystore.jks"
-                      storeFile file(ksPath)
-                      storePassword System.getenv("ANDROID_KEYSTORE_PASSWORD") ?: "trace_store_pass_2026"
-                      keyAlias System.getenv("ANDROID_KEY_ALIAS") ?: "upload"
-                      keyPassword System.getenv("ANDROID_KEY_PASSWORD") ?: "trace_key_pass_2026"
+                      storeFile file("upload-keystore.jks")
+                      storePassword "trace_upload_2026"
+                      keyAlias "upload"
+                      keyPassword "trace_upload_2026"
                   }
               }
 
@@ -132,11 +126,65 @@ jobs:
           }
           ''')
 
+          write_file("app/src/main/AndroidManifest.xml", r'''
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.INTERNET" />
+
+              <supports-screens
+                  android:smallScreens="true"
+                  android:normalScreens="true"
+                  android:largeScreens="true"
+                  android:xlargeScreens="true"
+                  android:anyDensity="true" />
+
+              <application
+                  android:allowBackup="true"
+                  android:fullBackupContent="true"
+                  android:icon="@mipmap/ic_launcher"
+                  android:roundIcon="@mipmap/ic_launcher_round"
+                  android:label="@string/app_name"
+                  android:supportsRtl="true"
+                  android:hardwareAccelerated="true"
+                  android:resizeableActivity="true"
+                  android:theme="@android:style/Theme.DeviceDefault.DayNight">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|uiMode|smallestScreenSize"
+                      android:windowSoftInputMode="adjustResize">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+
+                  <receiver
+                      android:name=".TraceWidgetProvider"
+                      android:exported="true"
+                      android:label="Trace">
+                      <intent-filter>
+                          <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+                          <action android:name="android.intent.action.CONFIGURATION_CHANGED" />
+                          <action android:name="android.intent.action.DATE_CHANGED" />
+                          <action android:name="android.intent.action.TIMEZONE_CHANGED" />
+                      </intent-filter>
+                      <meta-data
+                          android:name="android.appwidget.provider"
+                          android:resource="@xml/trace_widget_info" />
+                  </receiver>
+              </application>
+
+          </manifest>
+          ''')
+
           write_file("app/src/main/res/values/strings.xml", r'''
           <?xml version="1.0" encoding="utf-8"?>
           <resources>
               <string name="app_name">Trace</string>
-              <string name="widget_desc">Minimalist daily stream clock and mirror ritual widget.</string>
+              <string name="widget_desc">Auto-theme minimalist editorial clock, 7-day stream rhythm, and daily mirror reflection.</string>
           </resources>
           ''')
 
@@ -161,50 +209,52 @@ jobs:
           write_file("app/src/main/res/drawable/widget_bg_paper.xml", r'''
           <?xml version="1.0" encoding="utf-8"?>
           <shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
-              <solid android:color="#F5F5F3" />
-              <corners android:radius="22dp" />
-              <stroke android:width="1dp" android:color="#1F222220" />
+              <solid android:color="#F4F3EE" />
+              <corners android:radius="28dp" />
+              <stroke android:width="1.2dp" android:color="#261C1C1A" />
           </shape>
           ''')
 
           write_file("app/src/main/res/drawable/widget_bg_dark.xml", r'''
           <?xml version="1.0" encoding="utf-8"?>
           <shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
-              <solid android:color="#161615" />
-              <corners android:radius="22dp" />
-              <stroke android:width="1dp" android:color="#24F5F5F3" />
+              <solid android:color="#121211" />
+              <corners android:radius="28dp" />
+              <stroke android:width="1.2dp" android:color="#2EF4F3EE" />
+          </shape>
+          ''')
+
+          write_file("app/src/main/res/drawable/widget_pill_light.xml", r'''
+          <?xml version="1.0" encoding="utf-8"?>
+          <shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+              <solid android:color="#E8E6DF" />
+              <corners android:radius="16dp" />
+              <stroke android:width="0.8dp" android:color="#181C1C1A" />
+          </shape>
+          ''')
+
+          write_file("app/src/main/res/drawable/widget_pill_dark.xml", r'''
+          <?xml version="1.0" encoding="utf-8"?>
+          <shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+              <solid android:color="#1C1C1A" />
+              <corners android:radius="16dp" />
+              <stroke android:width="0.8dp" android:color="#1FF4F3EE" />
           </shape>
           ''')
 
           write_file("app/src/main/res/drawable/widget_dot_filled.xml", r'''
           <?xml version="1.0" encoding="utf-8"?>
           <shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="oval">
-              <solid android:color="#222220" />
-              <size android:width="5dp" android:height="5dp" />
+              <solid android:color="#1C1C1A" />
+              <size android:width="6dp" android:height="6dp" />
           </shape>
           ''')
 
           write_file("app/src/main/res/drawable/widget_dot_light.xml", r'''
           <?xml version="1.0" encoding="utf-8"?>
           <shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="oval">
-              <solid android:color="#F5F5F3" />
-              <size android:width="5dp" android:height="5dp" />
-          </shape>
-          ''')
-
-          write_file("app/src/main/res/drawable/widget_btn_circle.xml", r'''
-          <?xml version="1.0" encoding="utf-8"?>
-          <shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="oval">
-              <solid android:color="#12222220" />
-              <stroke android:width="1dp" android:color="#28222220" />
-          </shape>
-          ''')
-
-          write_file("app/src/main/res/drawable/widget_btn_circle_dark.xml", r'''
-          <?xml version="1.0" encoding="utf-8"?>
-          <shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="oval">
-              <solid android:color="#1AF5F5F3" />
-              <stroke android:width="1dp" android:color="#33F5F5F3" />
+              <solid android:color="#F4F3EE" />
+              <size android:width="6dp" android:height="6dp" />
           </shape>
           ''')
 
@@ -216,7 +266,7 @@ jobs:
               android:layout_height="match_parent"
               android:background="@drawable/widget_bg_paper"
               android:orientation="vertical"
-              android:padding="14dp">
+              android:padding="16dp">
 
               <RelativeLayout
                   android:layout_width="match_parent"
@@ -234,119 +284,159 @@ jobs:
                           android:id="@+id/widget_node_dot"
                           android:layout_width="6dp"
                           android:layout_height="6dp"
-                          android:layout_marginEnd="6dp"
+                          android:layout_marginEnd="7dp"
                           android:src="@drawable/widget_dot_filled" />
 
-                      <TextClock
-                          android:id="@+id/widget_date_clock"
+                      <TextView
+                          android:id="@+id/widget_brand_label"
                           android:layout_width="wrap_content"
                           android:layout_height="wrap_content"
-                          android:format12Hour="EEE MMM d"
-                          android:format24Hour="EEE MMM d"
-                          android:letterSpacing="0.06"
+                          android:fontFamily="monospace"
+                          android:letterSpacing="0.16"
+                          android:text="TRACE"
                           android:textAllCaps="true"
-                          android:textColor="#88222220"
-                          android:textSize="10sp" />
+                          android:textColor="#881C1C1A"
+                          android:textSize="9.5sp" />
                   </LinearLayout>
 
-                  <LinearLayout
+                  <TextClock
+                      android:id="@+id/widget_date_pill"
                       android:layout_width="wrap_content"
                       android:layout_height="wrap_content"
                       android:layout_alignParentEnd="true"
                       android:layout_centerVertical="true"
-                      android:gravity="center_vertical"
+                      android:background="@drawable/widget_pill_light"
+                      android:fontFamily="monospace"
+                      android:format12Hour="EEE · MMM d"
+                      android:format24Hour="EEE · MMM d"
+                      android:letterSpacing="0.08"
+                      android:paddingStart="10dp"
+                      android:paddingTop="3.5dp"
+                      android:paddingEnd="10dp"
+                      android:paddingBottom="3.5dp"
+                      android:textAllCaps="true"
+                      android:textColor="#CC1C1C1A"
+                      android:textSize="9.5sp" />
+              </RelativeLayout>
+
+              <RelativeLayout
+                  android:layout_width="match_parent"
+                  android:layout_height="0dp"
+                  android:layout_weight="1"
+                  android:gravity="center_vertical">
+
+                  <LinearLayout
+                      android:id="@+id/widget_clock_group"
+                      android:layout_width="wrap_content"
+                      android:layout_height="wrap_content"
+                      android:layout_alignParentStart="true"
+                      android:layout_centerVertical="true"
+                      android:gravity="bottom"
                       android:orientation="horizontal">
 
-                      <TextView
-                          android:id="@+id/widget_theme_btn"
-                          android:layout_width="24dp"
-                          android:layout_height="24dp"
-                          android:layout_marginEnd="6dp"
-                          android:background="@drawable/widget_btn_circle"
-                          android:gravity="center"
-                          android:text="☾"
-                          android:textColor="#222220"
+                      <TextClock
+                          android:id="@+id/widget_time_clock"
+                          android:layout_width="wrap_content"
+                          android:layout_height="wrap_content"
+                          android:fontFamily="serif"
+                          android:format12Hour="HH:mm"
+                          android:format24Hour="HH:mm"
+                          android:includeFontPadding="false"
+                          android:textColor="#1C1C1A"
+                          android:textSize="38sp" />
+
+                      <TextClock
+                          android:id="@+id/widget_sec_clock"
+                          android:layout_width="wrap_content"
+                          android:layout_height="wrap_content"
+                          android:layout_marginStart="4dp"
+                          android:layout_marginBottom="5dp"
+                          android:fontFamily="monospace"
+                          android:format12Hour=":ss"
+                          android:format24Hour=":ss"
+                          android:textColor="#661C1C1A"
                           android:textSize="11sp" />
+                  </LinearLayout>
+
+                  <LinearLayout
+                      android:id="@+id/widget_rhythm_box"
+                      android:layout_width="wrap_content"
+                      android:layout_height="wrap_content"
+                      android:layout_alignParentEnd="true"
+                      android:layout_centerVertical="true"
+                      android:gravity="end"
+                      android:orientation="vertical">
 
                       <TextView
-                          android:id="@+id/widget_stamp_btn"
-                          android:layout_width="24dp"
-                          android:layout_height="24dp"
-                          android:background="@drawable/widget_btn_circle"
-                          android:gravity="center"
-                          android:text="+"
-                          android:textColor="#222220"
-                          android:textSize="13sp" />
+                          android:id="@+id/widget_week_header"
+                          android:layout_width="wrap_content"
+                          android:layout_height="wrap_content"
+                          android:fontFamily="monospace"
+                          android:letterSpacing="0.18"
+                          android:text="S M T W T F S"
+                          android:textColor="#661C1C1A"
+                          android:textSize="8.5sp" />
+
+                      <TextView
+                          android:id="@+id/widget_week_dots"
+                          android:layout_width="wrap_content"
+                          android:layout_height="wrap_content"
+                          android:layout_marginTop="2dp"
+                          android:fontFamily="monospace"
+                          android:letterSpacing="0.18"
+                          android:text="· · · · · ◎ ·"
+                          android:textColor="#1C1C1A"
+                          android:textSize="9.5sp" />
+
+                      <TextView
+                          android:id="@+id/widget_stats_text"
+                          android:layout_width="wrap_content"
+                          android:layout_height="wrap_content"
+                          android:layout_marginTop="3dp"
+                          android:fontFamily="monospace"
+                          android:letterSpacing="0.06"
+                          android:text="1D · 0W"
+                          android:textColor="#771C1C1A"
+                          android:textSize="8.5sp" />
                   </LinearLayout>
               </RelativeLayout>
 
               <LinearLayout
+                  android:id="@+id/widget_mirror_card"
                   android:layout_width="match_parent"
-                  android:layout_height="0dp"
-                  android:layout_weight="1"
+                  android:layout_height="wrap_content"
+                  android:background="@drawable/widget_pill_light"
                   android:gravity="center_vertical"
-                  android:orientation="horizontal">
-
-                  <TextClock
-                      android:id="@+id/widget_time_clock"
-                      android:layout_width="wrap_content"
-                      android:layout_height="wrap_content"
-                      android:fontFamily="serif"
-                      android:format12Hour="HH:mm"
-                      android:format24Hour="HH:mm"
-                      android:textColor="#222220"
-                      android:textSize="34sp" />
-
-                  <TextClock
-                      android:id="@+id/widget_sec_clock"
-                      android:layout_width="wrap_content"
-                      android:layout_height="wrap_content"
-                      android:layout_marginStart="5dp"
-                      android:layout_marginTop="6dp"
-                      android:fontFamily="monospace"
-                      android:format12Hour=":ss"
-                      android:format24Hour=":ss"
-                      android:textColor="#66222220"
-                      android:textSize="11sp" />
-              </LinearLayout>
-
-              <FrameLayout
-                  android:id="@+id/widget_divider"
-                  android:layout_width="match_parent"
-                  android:layout_height="1dp"
-                  android:layout_marginTop="4dp"
-                  android:layout_marginBottom="7dp"
-                  android:background="#22222220" />
-
-              <RelativeLayout
-                  android:layout_width="match_parent"
-                  android:layout_height="wrap_content">
+                  android:orientation="horizontal"
+                  android:paddingStart="12dp"
+                  android:paddingTop="8dp"
+                  android:paddingEnd="12dp"
+                  android:paddingBottom="8dp">
 
                   <TextView
                       android:id="@+id/widget_entry_text"
-                      android:layout_width="match_parent"
+                      android:layout_width="0dp"
                       android:layout_height="wrap_content"
-                      android:layout_alignParentStart="true"
-                      android:layout_toStartOf="@+id/widget_stats_text"
-                      android:layout_marginEnd="8dp"
+                      android:layout_weight="1"
                       android:ellipsize="end"
                       android:fontFamily="serif"
                       android:maxLines="1"
-                      android:text="Tap + to mark this moment"
-                      android:textColor="#99222220"
-                      android:textSize="11.5sp" />
+                      android:text="A quiet page waiting for today's trace."
+                      android:textColor="#AA1C1C1A"
+                      android:textSize="11.5sp"
+                      android:textStyle="italic" />
 
                   <TextView
-                      android:id="@+id/widget_stats_text"
+                      android:id="@+id/widget_mirror_arrow"
                       android:layout_width="wrap_content"
                       android:layout_height="wrap_content"
-                      android:layout_alignParentEnd="true"
-                      android:layout_centerVertical="true"
+                      android:layout_marginStart="8dp"
                       android:fontFamily="monospace"
-                      android:text="0d • 0w"
-                      android:textColor="#66222220"
-                      android:textSize="9.5sp" />
-              </RelativeLayout>
+                      android:text="↗"
+                      android:textColor="#771C1C1A"
+                      android:textSize="11sp" />
+              </LinearLayout>
+
           </LinearLayout>
           ''')
 
@@ -360,21 +450,18 @@ jobs:
           import android.content.Context;
           import android.content.Intent;
           import android.content.SharedPreferences;
+          import android.content.res.Configuration;
           import android.graphics.Color;
           import android.widget.RemoteViews;
 
-          import java.text.SimpleDateFormat;
-          import java.util.Date;
-          import java.util.Locale;
+          import java.util.Calendar;
 
           public class TraceWidgetProvider extends AppWidgetProvider {
 
-              public static final String ACTION_WIDGET_STAMP = "com.muneebwanee.trace.ACTION_WIDGET_STAMP";
-              public static final String ACTION_WIDGET_THEME_TOGGLE = "com.muneebwanee.trace.ACTION_WIDGET_THEME_TOGGLE";
               public static final String WIDGET_PREFS = "trace_widget_prefs";
               public static final String KEY_TODAY_TEXT = "today_text";
               public static final String KEY_STATS_TEXT = "stats_text";
-              public static final String KEY_PENDING_STAMP = "pending_stamp";
+              public static final String KEY_WEEK_DOTS = "week_dots";
               public static final String KEY_DARK_MODE = "dark_mode";
 
               @Override
@@ -387,27 +474,7 @@ jobs:
               @Override
               public void onReceive(Context context, Intent intent) {
                   super.onReceive(context, intent);
-                  if (ACTION_WIDGET_STAMP.equals(intent.getAction())) {
-                      SharedPreferences prefs = context.getSharedPreferences(WIDGET_PREFS, Context.MODE_PRIVATE);
-                      String stamp = "[" + new SimpleDateFormat("HH:mm", Locale.getDefault()).format(new Date()) + "] ";
-                      String current = prefs.getString(KEY_TODAY_TEXT, "");
-                      String updated = (current == null || current.trim().isEmpty())
-                              ? ("Marked at " + stamp)
-                              : (current + "  " + stamp);
-                      String existingPending = prefs.getString(KEY_PENDING_STAMP, "");
-                      String nl = String.valueOf((char) 10);
-                      String nextPending = (existingPending == null || existingPending.isEmpty())
-                              ? stamp
-                              : (existingPending + nl + stamp);
-                      prefs.edit()
-                              .putString(KEY_TODAY_TEXT, updated)
-                              .putString(KEY_PENDING_STAMP, nextPending)
-                              .apply();
-                      updateAllWidgets(context);
-                  } else if (ACTION_WIDGET_THEME_TOGGLE.equals(intent.getAction())) {
-                      SharedPreferences prefs = context.getSharedPreferences(WIDGET_PREFS, Context.MODE_PRIVATE);
-                      boolean currentDark = prefs.getBoolean(KEY_DARK_MODE, false);
-                      prefs.edit().putBoolean(KEY_DARK_MODE, !currentDark).apply();
+                  if (intent != null && intent.getAction() != null) {
                       updateAllWidgets(context);
                   }
               }
@@ -420,62 +487,84 @@ jobs:
                   }
               }
 
+              private static String buildDefaultWeekDots() {
+                  int dow = Calendar.getInstance().get(Calendar.DAY_OF_WEEK) - 1;
+                  StringBuilder sb = new StringBuilder();
+                  for (int i = 0; i < 7; i++) {
+                      if (i > 0) sb.append(' ');
+                      sb.append(i == dow ? '◎' : '·');
+                  }
+                  return sb.toString();
+              }
+
               public static void updateSingleWidget(Context context, AppWidgetManager appWidgetManager, int appWidgetId) {
                   SharedPreferences prefs = context.getSharedPreferences(WIDGET_PREFS, Context.MODE_PRIVATE);
                   String todayText = prefs.getString(KEY_TODAY_TEXT, "");
-                  String statsText = prefs.getString(KEY_STATS_TEXT, "0d • 0w");
-                  boolean isDark = prefs.getBoolean(KEY_DARK_MODE, false);
+                  String statsText = prefs.getString(KEY_STATS_TEXT, "1D · 0W");
+                  String weekDots = prefs.getString(KEY_WEEK_DOTS, "");
+                  if (weekDots == null || weekDots.isEmpty()) {
+                      weekDots = buildDefaultWeekDots();
+                  }
+
+                  boolean systemNight = (context.getResources().getConfiguration().uiMode
+                          & Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES;
+                  boolean isDark = prefs.contains(KEY_DARK_MODE)
+                          ? prefs.getBoolean(KEY_DARK_MODE, systemNight)
+                          : systemNight;
 
                   RemoteViews views = new RemoteViews(context.getPackageName(), R.layout.trace_widget);
 
-                  int inkColor = isDark ? Color.parseColor("#F5F5F3") : Color.parseColor("#222220");
-                  int mutedColor = isDark ? Color.parseColor("#88F5F5F3") : Color.parseColor("#88222220");
-                  int subtleColor = isDark ? Color.parseColor("#66F5F5F3") : Color.parseColor("#66222220");
-                  int dividerColor = isDark ? Color.parseColor("#24F5F5F3") : Color.parseColor("#22222220");
+                  int inkColor = isDark ? Color.parseColor("#F4F3EE") : Color.parseColor("#1C1C1A");
+                  int mutedColor = isDark ? Color.parseColor("#99F4F3EE") : Color.parseColor("#881C1C1A");
+                  int subtleColor = isDark ? Color.parseColor("#66F4F3EE") : Color.parseColor("#661C1C1A");
 
                   views.setInt(R.id.widget_root, "setBackgroundResource", isDark ? R.drawable.widget_bg_dark : R.drawable.widget_bg_paper);
                   views.setImageViewResource(R.id.widget_node_dot, isDark ? R.drawable.widget_dot_light : R.drawable.widget_dot_filled);
-                  views.setInt(R.id.widget_theme_btn, "setBackgroundResource", isDark ? R.drawable.widget_btn_circle_dark : R.drawable.widget_btn_circle);
-                  views.setInt(R.id.widget_stamp_btn, "setBackgroundResource", isDark ? R.drawable.widget_btn_circle_dark : R.drawable.widget_btn_circle);
-                  views.setInt(R.id.widget_divider, "setBackgroundColor", dividerColor);
+                  views.setInt(R.id.widget_date_pill, "setBackgroundResource", isDark ? R.drawable.widget_pill_dark : R.drawable.widget_pill_light);
+                  views.setInt(R.id.widget_mirror_card, "setBackgroundResource", isDark ? R.drawable.widget_pill_dark : R.drawable.widget_pill_light);
 
-                  views.setTextColor(R.id.widget_date_clock, mutedColor);
+                  views.setTextColor(R.id.widget_brand_label, mutedColor);
+                  views.setTextColor(R.id.widget_date_pill, inkColor);
                   views.setTextColor(R.id.widget_time_clock, inkColor);
                   views.setTextColor(R.id.widget_sec_clock, subtleColor);
-                  views.setTextColor(R.id.widget_theme_btn, inkColor);
-                  views.setTextColor(R.id.widget_stamp_btn, inkColor);
-                  views.setTextColor(R.id.widget_entry_text, (todayText == null || todayText.trim().isEmpty()) ? subtleColor : inkColor);
-                  views.setTextColor(R.id.widget_stats_text, subtleColor);
+                  views.setTextColor(R.id.widget_week_header, subtleColor);
+                  views.setTextColor(R.id.widget_week_dots, inkColor);
+                  views.setTextColor(R.id.widget_stats_text, mutedColor);
+                  views.setTextColor(R.id.widget_mirror_arrow, mutedColor);
 
-                  views.setTextViewText(R.id.widget_theme_btn, isDark ? "☀" : "☾");
-
-                  if (todayText == null || todayText.trim().isEmpty()) {
-                      views.setTextViewText(R.id.widget_entry_text, "Tap + to mark this moment");
+                  boolean hasEntry = todayText != null && !todayText.trim().isEmpty();
+                  views.setTextColor(R.id.widget_entry_text, hasEntry ? inkColor : mutedColor);
+                  if (!hasEntry) {
+                      views.setTextViewText(R.id.widget_entry_text, "A quiet page waiting for today's trace.");
                   } else {
                       String oneLine = todayText.replace((char) 10, ' ').replace((char) 13, ' ').trim();
                       views.setTextViewText(R.id.widget_entry_text, oneLine);
                   }
-                  views.setTextViewText(R.id.widget_stats_text, statsText != null ? statsText : "0d • 0w");
 
-                  Intent openAppIntent = new Intent(context, MainActivity.class);
-                  openAppIntent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
-                  PendingIntent openPendingIntent = PendingIntent.getActivity(
-                          context, 0, openAppIntent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
-                  views.setOnClickPendingIntent(R.id.widget_root, openPendingIntent);
-                  views.setOnClickPendingIntent(R.id.widget_time_clock, openPendingIntent);
-                  views.setOnClickPendingIntent(R.id.widget_entry_text, openPendingIntent);
+                  views.setTextViewText(R.id.widget_week_dots, weekDots);
+                  views.setTextViewText(R.id.widget_stats_text, statsText != null ? statsText.toUpperCase() : "1D · 0W");
 
-                  Intent stampIntent = new Intent(context, TraceWidgetProvider.class);
-                  stampIntent.setAction(ACTION_WIDGET_STAMP);
-                  PendingIntent stampPendingIntent = PendingIntent.getBroadcast(
-                          context, 1, stampIntent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
-                  views.setOnClickPendingIntent(R.id.widget_stamp_btn, stampPendingIntent);
+                  Intent streamIntent = new Intent(context, MainActivity.class);
+                  streamIntent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+                  PendingIntent streamPending = PendingIntent.getActivity(
+                          context, 10, streamIntent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+                  views.setOnClickPendingIntent(R.id.widget_root, streamPending);
+                  views.setOnClickPendingIntent(R.id.widget_clock_group, streamPending);
 
-                  Intent themeIntent = new Intent(context, TraceWidgetProvider.class);
-                  themeIntent.setAction(ACTION_WIDGET_THEME_TOGGLE);
-                  PendingIntent themePendingIntent = PendingIntent.getBroadcast(
-                          context, 2, themeIntent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
-                  views.setOnClickPendingIntent(R.id.widget_theme_btn, themePendingIntent);
+                  Intent calIntent = new Intent(context, MainActivity.class);
+                  calIntent.putExtra("widget_action", "calendar");
+                  calIntent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+                  PendingIntent calPending = PendingIntent.getActivity(
+                          context, 11, calIntent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+                  views.setOnClickPendingIntent(R.id.widget_date_pill, calPending);
+                  views.setOnClickPendingIntent(R.id.widget_rhythm_box, calPending);
+
+                  Intent writeIntent = new Intent(context, MainActivity.class);
+                  writeIntent.putExtra("widget_action", "write_today");
+                  writeIntent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+                  PendingIntent writePending = PendingIntent.getActivity(
+                          context, 12, writeIntent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+                  views.setOnClickPendingIntent(R.id.widget_mirror_card, writePending);
 
                   appWidgetManager.updateAppWidget(appWidgetId, views);
               }
@@ -527,27 +616,24 @@ jobs:
                       html = html.replace(tf, legal_block + chr(10) + "        " + tf, 1)
                       open(idx_path, "w", encoding="utf-8").write(html)
 
-          print("Verified all Android widget XML, drawable, string, signing, and Java resources.")
+          print("Verified Android Auto-Theme Editorial Widget, Legal Pages, and Signing Config.")
 
-      - name: Configure Upload Keystore for Play Store Signing
-        env:
-          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      - name: Generate & Verify Fresh Upload Keystore for Play Store Signing
         run: |
           cd _build_android/app
-          if [ -n "$KEYSTORE_BASE64" ]; then
-            echo "$KEYSTORE_BASE64" | base64 --decode > upload-keystore.jks
-          elif [ ! -f "upload-keystore.jks" ]; then
-            keytool -genkeypair -v \
-              -keystore upload-keystore.jks \
-              -alias upload \
-              -keyalg RSA \
-              -keysize 2048 \
-              -validity 10000 \
-              -storepass "trace_store_pass_2026" \
-              -keypass "trace_key_pass_2026" \
-              -dname "CN=muneebwanee, OU=Trace, O=Trace, L=Srinagar, S=JK, C=IN"
-          fi
-          cp upload-keystore.jks release-upload-keystore.jks || true
+          rm -f upload-keystore.jks release-upload-keystore.jks
+          keytool -genkeypair -v \
+            -keystore upload-keystore.jks \
+            -storetype PKCS12 \
+            -alias upload \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -storepass "trace_upload_2026" \
+            -keypass "trace_upload_2026" \
+            -dname "CN=muneebwanee, OU=Trace, O=Trace, L=Srinagar, S=JK, C=IN"
+          keytool -list -v -keystore upload-keystore.jks -storepass "trace_upload_2026" -alias upload > /dev/null
+          cp upload-keystore.jks release-upload-keystore.jks
 
       - name: Set up Gradle 8.10.2
         uses: gradle/actions/setup-gradle@v4
@@ -556,11 +642,6 @@ jobs:
 
       - name: Build Signed Play Store Bundle (.aab) & Universal APK (.apk)
         working-directory: _build_android
-        env:
-          ANDROID_KEYSTORE_PATH: upload-keystore.jks
-          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD || 'trace_store_pass_2026' }}
-          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS || 'upload' }}
-          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD || 'trace_key_pass_2026' }}
         run: |
           gradle bundleRelease assembleRelease --no-daemon
           cp app/build/outputs/bundle/release/*.aab ../release-out/Trace_PlayStore_API36.aab
