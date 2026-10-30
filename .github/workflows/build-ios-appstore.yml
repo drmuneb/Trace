@@ -38,7 +38,7 @@ jobs:
           echo "PROJECT_DIR=$PROJECT_DIR" >> $GITHUB_ENV
           echo "Using iOS project directory: $PROJECT_DIR"
 
-      - name: Verify & Self-Heal TraceWidget Extension & Swift Files
+      - name: Verify & Self-Heal TraceWidget Auto-Theme Extension & Swift Files
         working-directory: ${{ env.PROJECT_DIR }}
         shell: python3 {0}
         run: |
@@ -86,63 +86,28 @@ jobs:
           widget_swift = textwrap.dedent(r'''
               import WidgetKit
               import SwiftUI
-              import AppIntents
-
-              @available(iOS 17.0, *)
-              struct MarkMomentWidgetIntent: AppIntent {
-                  static var title: LocalizedStringResource = "Mark Moment in Trace"
-                  static var description = IntentDescription("Stamps the current [HH:mm] time into today's diary stream.")
-
-                  func perform() async throws -> some IntentResult {
-                      let fmt = DateFormatter()
-                      fmt.dateFormat = "HH:mm"
-                      let stamp = "[" + fmt.string(from: Date()) + "] "
-                      let nl = String(UnicodeScalar(10))
-
-                      let suite = UserDefaults(suiteName: "group.com.muneebwanee.trace")
-                      let current = suite?.string(forKey: "trace_widget_today_text")
-                          ?? UserDefaults.standard.string(forKey: "trace_widget_today_text")
-                          ?? ""
-                      let updated = current.isEmpty ? stamp : (current.hasSuffix(nl) ? current + stamp : current + nl + stamp)
-
-                      suite?.set(updated, forKey: "trace_widget_today_text")
-                      suite?.set(stamp, forKey: "trace_widget_pending_stamp")
-                      UserDefaults.standard.set(updated, forKey: "trace_widget_today_text")
-                      UserDefaults.standard.set(stamp, forKey: "trace_widget_pending_stamp")
-
-                      WidgetCenter.shared.reloadAllTimelines()
-                      return .result()
-                  }
-              }
-
-              @available(iOS 17.0, *)
-              struct ToggleWidgetThemeIntent: AppIntent {
-                  static var title: LocalizedStringResource = "Toggle Light / Dark Theme"
-                  static var description = IntentDescription("Switches Trace and its widgets between Warm Paper and Dark Ink.")
-
-                  func perform() async throws -> some IntentResult {
-                      let suite = UserDefaults(suiteName: "group.com.muneebwanee.trace")
-                      let current = suite?.bool(forKey: "trace_widget_dark_mode")
-                          ?? UserDefaults.standard.bool(forKey: "trace_widget_dark_mode")
-                      let next = !current
-                      suite?.set(next, forKey: "trace_widget_dark_mode")
-                      UserDefaults.standard.set(next, forKey: "trace_widget_dark_mode")
-                      WidgetCenter.shared.reloadAllTimelines()
-                      return .result()
-                  }
-              }
 
               struct TraceWidgetEntry: TimelineEntry {
                   let date: Date
                   let todayText: String
                   let totalDays: Int
                   let totalWords: Int
-                  let isDarkMode: Bool
+                  let weekDots: String
+                  let hasExplicitTheme: Bool
+                  let explicitDarkMode: Bool
               }
 
               struct TraceWidgetProvider: TimelineProvider {
                   func placeholder(in context: Context) -> TraceWidgetEntry {
-                      TraceWidgetEntry(date: Date(), todayText: "", totalDays: 1, totalWords: 0, isDarkMode: false)
+                      TraceWidgetEntry(
+                          date: Date(),
+                          todayText: "",
+                          totalDays: 1,
+                          totalWords: 0,
+                          weekDots: defaultWeekDots(for: Date()),
+                          hasExplicitTheme: false,
+                          explicitDarkMode: false
+                      )
                   }
 
                   func getSnapshot(in context: Context, completion: @escaping (TraceWidgetEntry) -> Void) {
@@ -163,6 +128,15 @@ jobs:
                       completion(Timeline(entries: entries, policy: .after(nextReload)))
                   }
 
+                  private func defaultWeekDots(for d: Date) -> String {
+                      let wd = Calendar.current.component(.weekday, from: d) - 1
+                      var parts: [String] = []
+                      for i in 0..<7 {
+                          parts.append(i == wd ? "◎" : "·")
+                      }
+                      return parts.joined(separator: " ")
+                  }
+
                   private func loadEntry(for date: Date) -> TraceWidgetEntry {
                       let suite = UserDefaults(suiteName: "group.com.muneebwanee.trace")
                       let text = suite?.string(forKey: "trace_widget_today_text")
@@ -172,30 +146,57 @@ jobs:
                           ?? UserDefaults.standard.integer(forKey: "trace_widget_total_days")
                       let words = suite?.integer(forKey: "trace_widget_total_words")
                           ?? UserDefaults.standard.integer(forKey: "trace_widget_total_words")
-                      let dark: Bool
+                      let dots = suite?.string(forKey: "trace_widget_week_dots")
+                          ?? UserDefaults.standard.string(forKey: "trace_widget_week_dots")
+                          ?? defaultWeekDots(for: date)
+
+                      var hasExplicit = false
+                      var explicitDark = false
                       if let suiteObj = suite?.object(forKey: "trace_widget_dark_mode") as? Bool {
-                          dark = suiteObj
-                      } else {
-                          dark = UserDefaults.standard.bool(forKey: "trace_widget_dark_mode")
+                          hasExplicit = true
+                          explicitDark = suiteObj
+                      } else if let stdObj = UserDefaults.standard.object(forKey: "trace_widget_dark_mode") as? Bool {
+                          hasExplicit = true
+                          explicitDark = stdObj
                       }
-                      return TraceWidgetEntry(date: date, todayText: text, totalDays: days, totalWords: words, isDarkMode: dark)
+
+                      return TraceWidgetEntry(
+                          date: date,
+                          todayText: text,
+                          totalDays: max(1, days),
+                          totalWords: words,
+                          weekDots: dots,
+                          hasExplicitTheme: hasExplicit,
+                          explicitDarkMode: explicitDark
+                      )
                   }
               }
 
               struct TraceMinimalClockWidgetView: View {
                   var entry: TraceWidgetProvider.Entry
                   @Environment(\.widgetFamily) var family
+                  @Environment(\.colorScheme) var systemColorScheme
+
+                  private var isDark: Bool {
+                      entry.hasExplicitTheme ? entry.explicitDarkMode : (systemColorScheme == .dark)
+                  }
 
                   private var bgPaper: Color {
-                      entry.isDarkMode
-                          ? Color(red: 0.086, green: 0.086, blue: 0.082)
-                          : Color(red: 0.961, green: 0.961, blue: 0.953)
+                      isDark
+                          ? Color(red: 0.071, green: 0.071, blue: 0.067)
+                          : Color(red: 0.957, green: 0.953, blue: 0.933)
+                  }
+
+                  private var pillSurface: Color {
+                      isDark
+                          ? Color(red: 0.118, green: 0.118, blue: 0.110)
+                          : Color(red: 0.910, green: 0.902, blue: 0.875)
                   }
 
                   private var textInk: Color {
-                      entry.isDarkMode
-                          ? Color(red: 0.961, green: 0.961, blue: 0.953)
-                          : Color(red: 0.133, green: 0.133, blue: 0.125)
+                      isDark
+                          ? Color(red: 0.957, green: 0.953, blue: 0.933)
+                          : Color(red: 0.110, green: 0.110, blue: 0.102)
                   }
 
                   private var hasText: Bool {
@@ -212,74 +213,68 @@ jobs:
                                       if hasText {
                                           Circle().fill(textInk).frame(width: 5.5, height: 5.5)
                                       } else {
-                                          Circle().stroke(textInk.opacity(0.45), lineWidth: 1).frame(width: 5.5, height: 5.5)
+                                          Circle().stroke(textInk.opacity(0.45), lineWidth: 1.1).frame(width: 5.5, height: 5.5)
                                       }
-                                      Text(upperDateString(entry.date))
-                                          .font(.system(size: 9.5, weight: .medium))
-                                          .tracking(0.8)
+                                      Text("TRACE")
+                                          .font(.system(size: 8.5, weight: .semibold, design: .monospaced))
+                                          .tracking(1.4)
                                           .foregroundColor(textInk.opacity(0.55))
                                   }
 
                                   Spacer()
 
-                                  if #available(iOS 17.0, *) {
-                                      Button(intent: ToggleWidgetThemeIntent()) {
-                                          Image(systemName: entry.isDarkMode ? "sun.max" : "moon")
-                                              .font(.system(size: 9.5, weight: .light))
-                                              .foregroundColor(textInk.opacity(0.65))
-                                              .frame(width: 20, height: 20)
-                                              .overlay(Circle().stroke(textInk.opacity(0.16), lineWidth: 0.8))
-                                      }
-                                      .buttonStyle(.plain)
+                                  Text(upperDateString(entry.date))
+                                      .font(.system(size: 8.5, weight: .medium, design: .monospaced))
+                                      .tracking(0.6)
+                                      .foregroundColor(textInk.opacity(0.80))
+                                      .padding(.horizontal, 8)
+                                      .padding(.vertical, 3)
+                                      .background(pillSurface)
+                                      .clipShape(Capsule())
+                              }
 
-                                      Button(intent: MarkMomentWidgetIntent()) {
-                                          Image(systemName: "plus")
-                                              .font(.system(size: 9.5, weight: .regular))
+                              Spacer(minLength: 4)
+
+                              HStack(alignment: .center, spacing: 8) {
+                                  Text(hourMinuteString(entry.date))
+                                      .font(.custom("Georgia", size: family == .systemSmall ? 34 : 38))
+                                      .foregroundColor(textInk)
+
+                                  Spacer(minLength: 0)
+
+                                  if family != .systemSmall {
+                                      VStack(alignment: .trailing, spacing: 2) {
+                                          Text("S M T W T F S")
+                                              .font(.system(size: 7.5, weight: .regular, design: .monospaced))
+                                              .foregroundColor(textInk.opacity(0.42))
+                                          Text(entry.weekDots)
+                                              .font(.system(size: 8.5, weight: .semibold, design: .monospaced))
                                               .foregroundColor(textInk)
-                                              .frame(width: 20, height: 20)
-                                              .overlay(Circle().stroke(textInk.opacity(0.22), lineWidth: 0.8))
+                                          Text(String(entry.totalDays) + "D · " + String(entry.totalWords) + "W")
+                                              .font(.system(size: 7.5, weight: .regular, design: .monospaced))
+                                              .foregroundColor(textInk.opacity(0.50))
                                       }
-                                      .buttonStyle(.plain)
                                   }
                               }
 
                               Spacer(minLength: 4)
 
-                              HStack(alignment: .firstTextBaseline, spacing: 6) {
-                                  Text(hourMinuteString(entry.date))
-                                      .font(.custom("Georgia", size: family == .systemSmall ? 34 : 42))
-                                      .foregroundColor(textInk)
-
-                                  if family != .systemSmall {
-                                      Text(amPmString(entry.date))
-                                          .font(.system(size: 11, weight: .light, design: .monospaced))
-                                          .foregroundColor(textInk.opacity(0.42))
-                                  }
-                              }
-
-                              GeometryReader { geo in
-                                  ZStack(alignment: .leading) {
-                                      Rectangle().fill(textInk.opacity(0.12)).frame(height: 1)
-                                      Rectangle().fill(textInk).frame(width: max(4, geo.size.width * dayProgressFraction(entry.date)), height: 1.5)
-                                  }
-                              }
-                              .frame(height: 2)
-                              .padding(.vertical, 8)
-
                               HStack(alignment: .center, spacing: 6) {
-                                  Text(hasText ? cleanPreview(entry.todayText) : "Tap + to mark this moment")
-                                      .font(.custom("Georgia", size: 11))
-                                      .foregroundColor(hasText ? textInk.opacity(0.78) : textInk.opacity(0.38))
+                                  Text(hasText ? cleanPreview(entry.todayText) : "A quiet page waiting for today's trace.")
+                                      .font(.custom("Georgia-Italic", size: 10.5))
+                                      .foregroundColor(hasText ? textInk.opacity(0.85) : textInk.opacity(0.48))
                                       .lineLimit(1)
 
                                   Spacer(minLength: 0)
 
-                                  if entry.totalWords > 0 {
-                                      Text(String(entry.totalWords) + "w")
-                                          .font(.system(size: 9, weight: .regular, design: .monospaced))
-                                          .foregroundColor(textInk.opacity(0.40))
-                                  }
+                                  Text("↗")
+                                      .font(.system(size: 9.5, weight: .regular, design: .monospaced))
+                                      .foregroundColor(textInk.opacity(0.45))
                               }
+                              .padding(.horizontal, 10)
+                              .padding(.vertical, 7)
+                              .background(pillSurface)
+                              .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                           }
                           .padding(14)
                       }
@@ -291,22 +286,10 @@ jobs:
                       return f.string(from: d)
                   }
 
-                  private func amPmString(_ d: Date) -> String {
-                      let f = DateFormatter()
-                      f.dateFormat = "EEE"
-                      return f.string(from: d).uppercased()
-                  }
-
                   private func upperDateString(_ d: Date) -> String {
                       let f = DateFormatter()
-                      f.dateFormat = "EEE MMM d"
+                      f.dateFormat = "EEE · MMM d"
                       return f.string(from: d).uppercased()
-                  }
-
-                  private func dayProgressFraction(_ d: Date) -> CGFloat {
-                      let cal = Calendar.current
-                      let mins = cal.component(.hour, from: d) * 60 + cal.component(.minute, from: d)
-                      return CGFloat(mins) / 1440.0
                   }
 
                   private func cleanPreview(_ text: String) -> String {
@@ -323,16 +306,14 @@ jobs:
                           if #available(iOS 17.0, *) {
                               TraceMinimalClockWidgetView(entry: entry)
                                   .containerBackground(for: .widget) {
-                                      entry.isDarkMode
-                                          ? Color(red: 0.086, green: 0.086, blue: 0.082)
-                                          : Color(red: 0.961, green: 0.961, blue: 0.953)
+                                      Color.clear
                                   }
                           } else {
                               TraceMinimalClockWidgetView(entry: entry)
                           }
                       }
-                      .configurationDisplayName("Trace — Minimal Clock & Ritual")
-                      .description("Minimalist two-tone clock, day progress rail, and quick moment stamp synchronized with your light/dark theme.")
+                      .configurationDisplayName("Trace — Editorial Mirror & Clock")
+                      .description("Auto-theme minimalist editorial clock, 7-day stream rhythm, and daily mirror reflection.")
                       .supportedFamilies([.systemSmall, .systemMedium])
                   }
               }
@@ -408,7 +389,7 @@ jobs:
                   '''
                   cv_txt = cv_txt.replace("                        // Minimalist Attribution Footer", legal_swift + chr(10) + "                        // Minimalist Attribution Footer", 1)
                   open(cv, "w", encoding="utf-8").write(cv_txt)
-          print("Verified TraceWidget extension and SwiftUI files.")
+          print("Verified TraceWidget Auto-Theme extension and SwiftUI files.")
 
       - name: Install XcodeGen
         run: brew install xcodegen
