@@ -462,6 +462,7 @@ jobs:
               public static final String KEY_TODAY_TEXT = "today_text";
               public static final String KEY_STATS_TEXT = "stats_text";
               public static final String KEY_WEEK_DOTS = "week_dots";
+              public static final String KEY_PENDING_STAMP = "pending_stamp";
               public static final String KEY_DARK_MODE = "dark_mode";
 
               @Override
