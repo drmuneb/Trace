@@ -148,7 +148,7 @@ jobs:
                   android:supportsRtl="true"
                   android:hardwareAccelerated="true"
                   android:resizeableActivity="true"
-                  android:theme="@android:style/Theme.DeviceDefault.DayNight">
+                  android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
 
                   <activity
                       android:name=".MainActivity"
@@ -572,67 +572,658 @@ jobs:
           }
           ''')
 
-          main_java_path = os.path.join(base, "app/src/main/java/com/muneebwanee/trace/MainActivity.java")
-          if os.path.exists(main_java_path):
-              mj = open(main_java_path, encoding="utf-8").read()
-              if "setDarkMode" not in mj and "public class AndroidBridge {" in mj:
-                  bridge_add = r'''
-                  @JavascriptInterface
-                  public void setDarkMode(boolean isDark) {
-                      SharedPreferences wPrefs = getSharedPreferences(TraceWidgetProvider.WIDGET_PREFS, Context.MODE_PRIVATE);
-                      wPrefs.edit().putBoolean(TraceWidgetProvider.KEY_DARK_MODE, isDark).apply();
-                      TraceWidgetProvider.updateAllWidgets(MainActivity.this);
+          write_file("app/src/main/java/com/muneebwanee/trace/MainActivity.java", r'''
+              package com.muneebwanee.trace;
+
+              import android.app.Activity;
+              import android.app.backup.BackupManager;
+              import android.content.Context;
+              import android.content.Intent;
+              import android.content.SharedPreferences;
+              import android.graphics.Color;
+              import android.net.Uri;
+              import android.os.Build;
+              import android.os.Bundle;
+              import android.util.Base64;
+              import android.view.View;
+              import android.view.Window;
+              import android.webkit.JavascriptInterface;
+              import android.webkit.ValueCallback;
+              import android.webkit.WebChromeClient;
+              import android.webkit.WebSettings;
+              import android.webkit.WebView;
+              import android.webkit.WebViewClient;
+              import android.widget.Toast;
+
+              import org.json.JSONObject;
+
+              import java.io.ByteArrayOutputStream;
+              import java.io.File;
+              import java.io.FileInputStream;
+              import java.io.FileOutputStream;
+              import java.io.InputStream;
+              import java.io.OutputStream;
+              import java.nio.charset.StandardCharsets;
+              import java.text.SimpleDateFormat;
+              import java.util.Date;
+              import java.util.Iterator;
+              import java.util.Locale;
+
+              public class MainActivity extends Activity {
+
+                  private static final int FILE_CHOOSER_REQUEST_CODE = 1001;
+                  private static final int CREATE_FILE_REQUEST_CODE = 1002;
+                  private static final int CLOUD_SYNC_CREATE_CODE = 1003;
+                  private static final int CLOUD_RESTORE_OPEN_CODE = 1004;
+
+                  private static final String PREFS_NAME = "trace_android_cloud_prefs";
+                  private static final String KEY_CLOUD_URI = "linked_google_drive_uri";
+                  private static final String AUTO_BACKUP_FILENAME = "Trace_GoogleDrive_Backup.json";
+
+                  private WebView webView;
+                  private ValueCallback<Uri[]> filePathCallback;
+                  private byte[] pendingSaveBytes;
+                  private byte[] pendingCloudSyncBytes;
+
+                  @Override
+                  protected void onCreate(Bundle savedInstanceState) {
+                      requestWindowFeature(Window.FEATURE_NO_TITLE);
+                      super.onCreate(savedInstanceState);
+                      if (getActionBar() != null) {
+                          getActionBar().hide();
+                      }
+
+                      Window window = getWindow();
+                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                          window.setStatusBarColor(Color.parseColor("#F5F5F3"));
+                          window.setNavigationBarColor(Color.parseColor("#F5F5F3"));
+                          window.getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR);
+                      }
+
+                      webView = new WebView(this);
+                      webView.setBackgroundColor(Color.parseColor("#F5F5F3"));
+
+                      WebSettings settings = webView.getSettings();
+                      settings.setJavaScriptEnabled(true);
+                      settings.setDomStorageEnabled(true);
+                      settings.setDatabaseEnabled(true);
+                      settings.setAllowFileAccess(true);
+                      settings.setAllowContentAccess(true);
+                      settings.setLoadWithOverviewMode(true);
+                      settings.setUseWideViewPort(true);
+
+                      webView.addJavascriptInterface(new AndroidBridge(), "AndroidBridge");
+                      webView.setWebViewClient(new WebViewClient() {
+                          @Override
+                          public void onPageFinished(WebView view, String url) {
+                              super.onPageFinished(view, url);
+                              restoreFromInternalAutoBackupIfNeeded();
+                              Intent launchIntent = getIntent();
+                              if (launchIntent != null) {
+                                  String wAction = launchIntent.getStringExtra("widget_action");
+                                  if ("calendar".equals(wAction)) {
+                                      view.evaluateJavascript("if(window.__openTraceCalendarFromWidget){window.__openTraceCalendarFromWidget();}", null);
+                                  } else if ("write_today".equals(wAction)) {
+                                      view.evaluateJavascript("if(window.__focusTraceTodayFromWidget){window.__focusTraceTodayFromWidget();}", null);
+                                  }
+                              }
+                          }
+                      });
+
+                      webView.setWebChromeClient(new WebChromeClient() {
+                          @Override
+                          public boolean onShowFileChooser(
+                                  WebView webView,
+                                  ValueCallback<Uri[]> filePathCallback,
+                                  FileChooserParams fileChooserParams
+                          ) {
+                              if (MainActivity.this.filePathCallback != null) {
+                                  MainActivity.this.filePathCallback.onReceiveValue(null);
+                              }
+                              MainActivity.this.filePathCallback = filePathCallback;
+
+                              Intent intent = new Intent(Intent.ACTION_GET_CONTENT);
+                              intent.addCategory(Intent.CATEGORY_OPENABLE);
+                              intent.setType("*/*");
+                              startActivityForResult(Intent.createChooser(intent, "Select File or Font"), FILE_CHOOSER_REQUEST_CODE);
+                              return true;
+                          }
+                      });
+
+                      setContentView(webView);
+                      webView.loadUrl("file:///android_asset/index.html");
                   }
-                  '''
-                  mj = mj.replace("public class AndroidBridge {", "public class AndroidBridge {" + chr(10) + bridge_add, 1)
-                  open(main_java_path, "w", encoding="utf-8").write(mj)
+
+                  private void saveToInternalAutoBackup(byte[] bytes) {
+                      try {
+                          File file = new File(getFilesDir(), AUTO_BACKUP_FILENAME);
+                          try (FileOutputStream fos = new FileOutputStream(file)) {
+                              fos.write(bytes);
+                              fos.flush();
+                          }
+                          BackupManager.dataChanged(getPackageName());
+                      } catch (Exception ignored) {
+                      }
+                  }
+
+                  private void restoreFromInternalAutoBackupIfNeeded() {
+                      try {
+                          File file = new File(getFilesDir(), AUTO_BACKUP_FILENAME);
+                          if (!file.exists()) return;
+                          byte[] buf = new byte[(int) file.length()];
+                          try (FileInputStream fis = new FileInputStream(file)) {
+                              fis.read(buf);
+                          }
+                          String json = new String(buf, StandardCharsets.UTF_8);
+                          String quoted = JSONObject.quote(json);
+                          runOnUiThread(() -> webView.evaluateJavascript(
+                                  "if (!localStorage.getItem('trace_journal_entries_clean_v2') && window.__onAndroidCloudRestore) { window.__onAndroidCloudRestore(" + quoted + "); }",
+                                  null
+                          ));
+                      } catch (Exception ignored) {
+                      }
+                  }
+
+                  private boolean tryWriteToLinkedCloudUri(byte[] bytes) {
+                      SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+                      String uriStr = prefs.getString(KEY_CLOUD_URI, null);
+                      if (uriStr == null || uriStr.isEmpty()) return false;
+                      try {
+                          Uri uri = Uri.parse(uriStr);
+                          try (OutputStream os = getContentResolver().openOutputStream(uri, "wt")) {
+                              if (os != null) {
+                                  os.write(bytes);
+                                  os.flush();
+                                  return true;
+                              }
+                          }
+                      } catch (Exception e) {
+                          prefs.edit().remove(KEY_CLOUD_URI).apply();
+                      }
+                      return false;
+                  }
+
+                  private void updateHomeWidgetFromJson(String jsonData) {
+                      try {
+                          JSONObject root = new JSONObject(jsonData);
+                          JSONObject entriesObj = root.optJSONObject("entries");
+                          if (entriesObj == null) return;
+                          String todayKey = new SimpleDateFormat("yyyy-MM-dd", Locale.US).format(new Date());
+                          String todayText = "";
+                          if (entriesObj.has(todayKey)) {
+                              JSONObject todayItem = entriesObj.optJSONObject(todayKey);
+                              if (todayItem != null) {
+                                  todayText = todayItem.optString("text", "");
+                              }
+                          }
+                          int days = 0;
+                          int words = 0;
+                          Iterator<String> keys = entriesObj.keys();
+                          while (keys.hasNext()) {
+                              String k = keys.next();
+                              JSONObject item = entriesObj.optJSONObject(k);
+                              if (item != null) {
+                                  String t = item.optString("text", "").trim();
+                                  if (!t.isEmpty()) {
+                                      days++;
+                                      words += t.split("\\s+").length;
+                                  }
+                              }
+                          }
+                          java.util.Calendar cal = java.util.Calendar.getInstance();
+                          int todayDow = cal.get(java.util.Calendar.DAY_OF_WEEK) - 1;
+                          cal.add(java.util.Calendar.DAY_OF_YEAR, -todayDow);
+                          StringBuilder weekBuilder = new StringBuilder();
+                          SimpleDateFormat fmtKey = new SimpleDateFormat("yyyy-MM-dd", Locale.US);
+                          for (int i = 0; i < 7; i++) {
+                              if (i > 0) weekBuilder.append(' ');
+                              String kDay = fmtKey.format(cal.getTime());
+                              boolean hasW = false;
+                              if (entriesObj.has(kDay)) {
+                                  JSONObject dItem = entriesObj.optJSONObject(kDay);
+                                  if (dItem != null && !dItem.optString("text", "").trim().isEmpty()) {
+                                      hasW = true;
+                                  }
+                              }
+                              if (hasW) {
+                                  weekBuilder.append('●');
+                              } else if (i == todayDow) {
+                                  weekBuilder.append('◎');
+                              } else {
+                                  weekBuilder.append('·');
+                              }
+                              cal.add(java.util.Calendar.DAY_OF_YEAR, 1);
+                          }
+                          SharedPreferences wPrefs = getSharedPreferences(TraceWidgetProvider.WIDGET_PREFS, Context.MODE_PRIVATE);
+                          wPrefs.edit()
+                                  .putString(TraceWidgetProvider.KEY_TODAY_TEXT, todayText)
+                                  .putString(TraceWidgetProvider.KEY_STATS_TEXT, days + "D · " + words + "W")
+                                  .putString(TraceWidgetProvider.KEY_WEEK_DOTS, weekBuilder.toString())
+                                  .apply();
+                          TraceWidgetProvider.updateAllWidgets(this);
+                      } catch (Exception ignored) {
+                      }
+                  }
+
+                  private void notifySyncStatusInWebView(String statusText) {
+                      String quoted = JSONObject.quote(statusText);
+                      runOnUiThread(() -> webView.evaluateJavascript(
+                              "if (window.__onAndroidSyncStatus) { window.__onAndroidSyncStatus(" + quoted + "); }",
+                              null
+                      ));
+                  }
+
+                  public class AndroidBridge {
+
+                      @JavascriptInterface
+                      public String consumePendingWidgetStamp() {
+                          SharedPreferences wPrefs = getSharedPreferences(TraceWidgetProvider.WIDGET_PREFS, Context.MODE_PRIVATE);
+                          String stamp = wPrefs.getString(TraceWidgetProvider.KEY_PENDING_STAMP, "");
+                          if (stamp != null && !stamp.isEmpty()) {
+                              wPrefs.edit().remove(TraceWidgetProvider.KEY_PENDING_STAMP).apply();
+                              return stamp;
+                          }
+                          return "";
+                      }
+
+                      @JavascriptInterface
+                      public void setDarkMode(boolean isDark) {
+                          SharedPreferences wPrefs = getSharedPreferences(TraceWidgetProvider.WIDGET_PREFS, Context.MODE_PRIVATE);
+                          wPrefs.edit().putBoolean(TraceWidgetProvider.KEY_DARK_MODE, isDark).apply();
+                          TraceWidgetProvider.updateAllWidgets(MainActivity.this);
+                          runOnUiThread(() -> {
+                              if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                                  Window window = getWindow();
+                                  int barColor = Color.parseColor(isDark ? "#161615" : "#F5F5F3");
+                                  window.setStatusBarColor(barColor);
+                                  window.setNavigationBarColor(barColor);
+                                  int flags = window.getDecorView().getSystemUiVisibility();
+                                  if (isDark) {
+                                      flags &= ~View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;
+                                  } else {
+                                      flags |= View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;
+                                  }
+                                  window.getDecorView().setSystemUiVisibility(flags);
+                              }
+                          });
+                      }
+
+                      @JavascriptInterface
+                      public void autoSync(String jsonData) {
+                          if (jsonData == null) return;
+                          byte[] bytes = jsonData.getBytes(StandardCharsets.UTF_8);
+                          saveToInternalAutoBackup(bytes);
+                          tryWriteToLinkedCloudUri(bytes);
+                          updateHomeWidgetFromJson(jsonData);
+                      }
+
+                      @JavascriptInterface
+                      public void syncNow(String jsonData) {
+                          if (jsonData == null) return;
+                          byte[] bytes = jsonData.getBytes(StandardCharsets.UTF_8);
+                          saveToInternalAutoBackup(bytes);
+                          updateHomeWidgetFromJson(jsonData);
+
+                          if (tryWriteToLinkedCloudUri(bytes)) {
+                              String timeStr = new SimpleDateFormat("HH:mm", Locale.getDefault()).format(new Date());
+                              notifySyncStatusInWebView("Synced " + timeStr);
+                              return;
+                          }
+
+                          pendingCloudSyncBytes = bytes;
+                          Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+                          intent.addCategory(Intent.CATEGORY_OPENABLE);
+                          intent.setType("application/json");
+                          intent.putExtra(Intent.EXTRA_TITLE, "Trace_GoogleDrive_Sync.json");
+                          intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
+                                  | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                                  | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+                          startActivityForResult(intent, CLOUD_SYNC_CREATE_CODE);
+                      }
+
+                      @JavascriptInterface
+                      public void restoreFromCloud() {
+                          Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+                          intent.addCategory(Intent.CATEGORY_OPENABLE);
+                          intent.setType("*/*");
+                          intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
+                                  | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                                  | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+                          startActivityForResult(intent, CLOUD_RESTORE_OPEN_CODE);
+                      }
+
+                      @JavascriptInterface
+                      public void saveFile(String base64Data, String filename, String mimeType) {
+                          try {
+                              pendingSaveBytes = Base64.decode(base64Data, Base64.DEFAULT);
+                              Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+                              intent.addCategory(Intent.CATEGORY_OPENABLE);
+                              intent.setType(mimeType != null && !mimeType.isEmpty() ? mimeType : "*/*");
+                              intent.putExtra(Intent.EXTRA_TITLE, filename != null ? filename : "Trace_Diary.pdf");
+                              startActivityForResult(intent, CREATE_FILE_REQUEST_CODE);
+                          } catch (Exception e) {
+                              runOnUiThread(() -> Toast.makeText(MainActivity.this, "Unable to export file", Toast.LENGTH_SHORT).show());
+                          }
+                      }
+                  }
+
+                  @Override
+                  protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+                      if (requestCode == FILE_CHOOSER_REQUEST_CODE) {
+                          if (filePathCallback == null) return;
+                          Uri[] results = null;
+                          if (resultCode == Activity.RESULT_OK && data != null && data.getDataString() != null) {
+                              results = new Uri[]{Uri.parse(data.getDataString())};
+                          }
+                          filePathCallback.onReceiveValue(results);
+                          filePathCallback = null;
+
+                      } else if (requestCode == CLOUD_SYNC_CREATE_CODE) {
+                          if (resultCode == Activity.RESULT_OK && data != null && data.getData() != null && pendingCloudSyncBytes != null) {
+                              Uri uri = data.getData();
+                              try {
+                                  final int takeFlags = data.getFlags() & (Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+                                  getContentResolver().takePersistableUriPermission(uri, takeFlags);
+                              } catch (Exception ignored) {
+                              }
+                              getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                                      .edit()
+                                      .putString(KEY_CLOUD_URI, uri.toString())
+                                      .apply();
+                              if (tryWriteToLinkedCloudUri(pendingCloudSyncBytes)) {
+                                  String timeStr = new SimpleDateFormat("HH:mm", Locale.getDefault()).format(new Date());
+                                  notifySyncStatusInWebView("Synced " + timeStr);
+                              }
+                          }
+                          pendingCloudSyncBytes = null;
+
+                      } else if (requestCode == CLOUD_RESTORE_OPEN_CODE) {
+                          if (resultCode == Activity.RESULT_OK && data != null && data.getData() != null) {
+                              Uri uri = data.getData();
+                              try {
+                                  final int takeFlags = data.getFlags() & (Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+                                  getContentResolver().takePersistableUriPermission(uri, takeFlags);
+                                  getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                                          .edit()
+                                          .putString(KEY_CLOUD_URI, uri.toString())
+                                          .apply();
+                              } catch (Exception ignored) {
+                              }
+                              try (InputStream is = getContentResolver().openInputStream(uri)) {
+                                  if (is != null) {
+                                      ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+                                      byte[] chunk = new byte[4096];
+                                      int n;
+                                      while ((n = is.read(chunk)) != -1) {
+                                          buffer.write(chunk, 0, n);
+                                      }
+                                      byte[] readBytes = buffer.toByteArray();
+                                      saveToInternalAutoBackup(readBytes);
+                                      String json = new String(readBytes, StandardCharsets.UTF_8);
+                                      String quoted = JSONObject.quote(json);
+                                      runOnUiThread(() -> webView.evaluateJavascript(
+                                              "if (window.__onAndroidCloudRestore) { window.__onAndroidCloudRestore(" + quoted + "); }",
+                                              null
+                                      ));
+                                  }
+                              } catch (Exception e) {
+                                  Toast.makeText(this, "Restore failed", Toast.LENGTH_SHORT).show();
+                              }
+                          }
+
+                      } else if (requestCode == CREATE_FILE_REQUEST_CODE) {
+                          if (resultCode == Activity.RESULT_OK && data != null && data.getData() != null && pendingSaveBytes != null) {
+                              Uri uri = data.getData();
+                              try (OutputStream os = getContentResolver().openOutputStream(uri)) {
+                                  if (os != null) {
+                                      os.write(pendingSaveBytes);
+                                      os.flush();
+                                      Toast.makeText(this, "Saved to Files", Toast.LENGTH_SHORT).show();
+                                  }
+                              } catch (Exception e) {
+                                  Toast.makeText(this, "Save failed", Toast.LENGTH_SHORT).show();
+                              }
+                          }
+                          pendingSaveBytes = null;
+                      } else {
+                          super.onActivityResult(requestCode, resultCode, data);
+                      }
+                  }
+
+                  @Override
+                  public void onBackPressed() {
+                      if (webView != null && webView.canGoBack()) {
+                          webView.goBack();
+                      } else {
+                          super.onBackPressed();
+                      }
+                  }
+              }
+          ''')
 
           idx_path = os.path.join(base, "app/src/main/assets/index.html")
           if os.path.exists(idx_path):
+              import re
               html = open(idx_path, encoding="utf-8").read()
-              if "legalReaderModal" not in html and "Legal &amp; Privacy" not in html:
-                  tf = "<!-- Minimal Attribution Footer"
-                  legal_block = r'''
-                  <div class="py-3.5 space-y-2" style="border-color: var(--line-rail);">
-                    <div class="flex items-center justify-between">
-                      <span class="font-medium">Legal &amp; Privacy</span>
-                      <span class="text-[10px] uppercase" style="color: var(--text-subtle);">100% Offline</span>
-                    </div>
-                    <details class="rounded-lg border p-2.5 text-[11px] space-y-1.5" style="border-color: var(--line-rail);">
-                      <summary class="cursor-pointer font-medium">Terms of Service (0.0.1v)</summary>
-                      <p style="color: var(--text-muted);">Trace is an offline-first daily stream diary developed by muneebwanee. You retain 100% ownership and copyright over all entries you write. Provided AS IS under the MIT License.</p>
-                    </details>
-                    <details class="rounded-lg border p-2.5 text-[11px] space-y-1.5" style="border-color: var(--line-rail);">
-                      <summary class="cursor-pointer font-medium">Privacy Policy &amp; Zero Telemetry</summary>
-                      <p style="color: var(--text-muted);">Trace collects zero personal data, runs zero analytics or advertising SDKs, and stores all entries strictly on your device (and optional user-initiated cloud/file backups).</p>
-                    </details>
-                    <details class="rounded-lg border p-2.5 text-[11px] space-y-1.5" style="border-color: var(--line-rail);">
-                      <summary class="cursor-pointer font-medium">Store EULA, Data Safety &amp; Local Wipe</summary>
-                      <p style="color: var(--text-muted);">Complies with Apple App Store, Google Play API 36, Microsoft Store, and Linux store rules. Tap below to permanently erase all local diary data on this device:</p>
-                      <button type="button" onclick="if(confirm('Permanently erase all local diary entries on this device?')){localStorage.clear();location.reload();}" class="mono-btn py-1 px-2.5 rounded text-[10.5px] mt-1">Erase All Local Diary Data</button>
-                    </details>
-                  </div>
-                  '''
-                  if tf in html:
-                      html = html.replace(tf, legal_block + chr(10) + "        " + tf, 1)
-                      open(idx_path, "w", encoding="utf-8").write(html)
+              html = html.replace('<script src="https://cdn.tailwindcss.com/3.4.17"></script>', '')
+              html = html.replace('<script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.2/dist/jspdf.umd.min.js"></script>', '')
+              html = html.replace('<script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.2/dist/jspdf.umd.min.js" defer></script>', '')
+              html = html.replace('<link rel="preconnect" href="https://fonts.googleapis.com">', '')
+              html = html.replace('<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>', '')
+              html = re.sub(r'<link href="https://fonts\.googleapis\.com/css2\?[^"]+" rel="stylesheet">', '', html)
 
-          print("Verified Android Auto-Theme Editorial Widget, Legal Pages, and Signing Config.")
+              if "COMPLETE SELF-CONTAINED OFFLINE UTILITY STYLESHEET" not in html:
+                  offline_css = """
+              /* === COMPLETE SELF-CONTAINED OFFLINE UTILITY STYLESHEET (ZERO CDN DEPENDENCY) === */
+              *, ::before, ::after { box-sizing: border-box; border-width: 0; border-style: solid; border-color: var(--line-rail); }
+              html { line-height: 1.5; -webkit-text-size-adjust: 100%; font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; }
+              h1, h2, h3, h4, h5, h6, p, ul, ol, pre, blockquote { margin: 0; padding: 0; font-size: inherit; font-weight: inherit; }
+              button, input, optgroup, select, textarea { font-family: inherit; font-size: 100%; font-weight: inherit; line-height: inherit; color: inherit; margin: 0; padding: 0; background-color: transparent; border: none; }
+              button, [role="button"] { cursor: pointer; }
+              svg { display: block; vertical-align: middle; width: 1rem; height: 1rem; flex-shrink: 0; }
+              a { color: inherit; text-decoration: inherit; }
+              ul { list-style: none; }
+              ul.list-disc { list-style-type: disc; }
+              .hidden { display: none !important; }
+              .flex { display: flex; }
+              .inline-flex { display: inline-flex; }
+              .grid { display: grid; }
+              .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border-width: 0; }
+              .relative { position: relative; }
+              .absolute { position: absolute; }
+              .fixed { position: fixed; }
+              .inset-0 { top: 0; right: 0; bottom: 0; left: 0; }
+              .left-0 { left: 0; }
+              .right-0 { right: 0; }
+              .right-0\\.5 { right: 0.125rem; }
+              .right-5 { right: 1.25rem; }
+              .top-0\\.5 { top: 0.125rem; }
+              .bottom-5 { bottom: 1.25rem; }
+              .bottom-6 { bottom: 1.5rem; }
+              .z-20 { z-index: 20; }
+              .z-50 { z-index: 50; }
+              .flex-col { flex-direction: column; }
+              .flex-1 { flex: 1 1 0%; }
+              .shrink-0 { flex-shrink: 0; }
+              .items-center { align-items: center; }
+              .items-start { align-items: flex-start; }
+              .items-end { align-items: flex-end; }
+              .items-stretch { align-items: stretch; }
+              .self-stretch { align-self: stretch; }
+              .justify-between { justify-content: space-between; }
+              .justify-center { justify-content: center; }
+              .grid-cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+              .grid-cols-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+              .grid-cols-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+              .grid-cols-7 { grid-template-columns: repeat(7, minmax(0, 1fr)); }
+              .gap-1 { gap: 0.25rem; }
+              .gap-1\\.5 { gap: 0.375rem; }
+              .gap-2 { gap: 0.5rem; }
+              .gap-2\\.5 { gap: 0.625rem; }
+              .gap-3\\.5 { gap: 0.875rem; }
+              .gap-4 { gap: 1rem; }
+              .gap-7 { gap: 1.75rem; }
+              .gap-y-2 { row-gap: 0.5rem; }
+              .space-y-1 > :not([hidden]) ~ :not([hidden]) { margin-top: 0.25rem; }
+              .space-y-1\\.5 > :not([hidden]) ~ :not([hidden]) { margin-top: 0.375rem; }
+              .space-y-2\\.5 > :not([hidden]) ~ :not([hidden]) { margin-top: 0.625rem; }
+              .space-y-3 > :not([hidden]) ~ :not([hidden]) { margin-top: 0.75rem; }
+              .space-y-4 > :not([hidden]) ~ :not([hidden]) { margin-top: 1rem; }
+              .space-y-5 > :not([hidden]) ~ :not([hidden]) { margin-top: 1.25rem; }
+              .divide-y > :not([hidden]) ~ :not([hidden]) { border-top-width: 1px; border-color: var(--line-rail); }
+              .w-full { width: 100%; }
+              .w-\\[1px\\] { width: 1px; }
+              .w-2 { width: 0.5rem; }
+              .w-2\\.5 { width: 0.625rem; }
+              .w-3 { width: 0.75rem; }
+              .w-3\\.5 { width: 0.875rem; }
+              .w-4 { width: 1rem; }
+              .w-8 { width: 2rem; }
+              .w-9 { width: 2.25rem; }
+              .w-10 { width: 2.5rem; }
+              .w-32 { width: 8rem; }
+              .min-w-0 { min-width: 0px; }
+              .max-w-full { max-width: 100%; }
+              .max-w-sm { max-width: 24rem; }
+              .max-w-lg { max-width: 32rem; }
+              .h-auto { height: auto; }
+              .h-\\[1\\.5px\\] { height: 1.5px; }
+              .h-2 { height: 0.5rem; }
+              .h-3 { height: 0.75rem; }
+              .h-3\\.5 { height: 0.875rem; }
+              .h-4 { height: 1rem; }
+              .h-4\\.5 { height: 1.125rem; }
+              .h-5 { height: 1.25rem; }
+              .h-8 { height: 2rem; }
+              .h-9 { height: 2.25rem; }
+              .h-\\[88vh\\] { height: 88vh; }
+              .min-h-\\[28px\\] { min-height: 28px; }
+              .min-h-screen { min-height: 100vh; }
+              .max-h-\\[88vh\\] { max-height: 88vh; }
+              .p-0 { padding: 0; }
+              .p-1 { padding: 0.25rem; }
+              .p-1\\.5 { padding: 0.375rem; }
+              .p-3 { padding: 0.75rem; }
+              .p-4 { padding: 1rem; }
+              .px-1\\.5 { padding-left: 0.375rem; padding-right: 0.375rem; }
+              .px-2 { padding-left: 0.5rem; padding-right: 0.5rem; }
+              .px-2\\.5 { padding-left: 0.625rem; padding-right: 0.625rem; }
+              .px-3 { padding-left: 0.75rem; padding-right: 0.75rem; }
+              .px-3\\.5 { padding-left: 0.875rem; padding-right: 0.875rem; }
+              .px-5 { padding-left: 1.25rem; padding-right: 1.25rem; }
+              .px-6 { padding-left: 1.5rem; padding-right: 1.5rem; }
+              .py-0\\.5 { padding-top: 0.125rem; padding-bottom: 0.125rem; }
+              .py-1 { padding-top: 0.25rem; padding-bottom: 0.25rem; }
+              .py-1\\.5 { padding-top: 0.375rem; padding-bottom: 0.375rem; }
+              .py-2 { padding-top: 0.5rem; padding-bottom: 0.5rem; }
+              .py-2\\.5 { padding-top: 0.625rem; padding-bottom: 0.625rem; }
+              .py-3 { padding-top: 0.75rem; padding-bottom: 0.75rem; }
+              .py-3\\.5 { padding-top: 0.875rem; padding-bottom: 0.875rem; }
+              .py-5 { padding-top: 1.25rem; padding-bottom: 1.25rem; }
+              .pt-0\\.5 { padding-top: 0.125rem; }
+              .pt-1 { padding-top: 0.25rem; }
+              .pt-3 { padding-top: 0.75rem; }
+              .pt-3\\.5 { padding-top: 0.875rem; }
+              .pt-4 { padding-top: 1rem; }
+              .pb-1 { padding-bottom: 0.25rem; }
+              .pb-2 { padding-bottom: 0.5rem; }
+              .pb-2\\.5 { padding-bottom: 0.625rem; }
+              .pb-4 { padding-bottom: 1rem; }
+              .pb-7 { padding-bottom: 1.75rem; }
+              .pb-28 { padding-bottom: 7rem; }
+              .pl-4 { padding-left: 1rem; }
+              .mx-auto { margin-left: auto; margin-right: auto; }
+              .mt-0\\.5 { margin-top: 0.125rem; }
+              .mb-2 { margin-bottom: 0.5rem; }
+              .mb-3 { margin-bottom: 0.75rem; }
+              .font-mono { font-family: 'Courier Prime', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+              .font-normal { font-weight: 400; }
+              .font-medium { font-weight: 500; }
+              .font-semibold { font-weight: 600; }
+              .font-bold { font-weight: 700; }
+              .italic { font-style: italic; }
+              .uppercase { text-transform: uppercase; }
+              .underline { text-decoration-line: underline; }
+              .truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+              .whitespace-nowrap { white-space: nowrap; }
+              .tabular-nums { font-variant-numeric: tabular-nums; }
+              .text-left { text-align: left; }
+              .text-center { text-align: center; }
+              .text-\\[10px\\] { font-size: 10px; }
+              .text-\\[10\\.5px\\] { font-size: 10.5px; }
+              .text-\\[11px\\] { font-size: 11px; }
+              .text-\\[11\\.5px\\] { font-size: 11.5px; }
+              .text-xs { font-size: 0.75rem; line-height: 1rem; }
+              .text-\\[12\\.5px\\] { font-size: 12.5px; }
+              .text-\\[13px\\] { font-size: 13px; }
+              .text-base { font-size: 1rem; line-height: 1.5rem; }
+              .leading-\\[1\\.15\\] { line-height: 1.15; }
+              .leading-tight { line-height: 1.25; }
+              .leading-relaxed { line-height: 1.625; }
+              .tracking-tight { letter-spacing: -0.025em; }
+              .tracking-wide { letter-spacing: 0.025em; }
+              .tracking-wider { letter-spacing: 0.05em; }
+              .border { border-width: 1px; }
+              .rounded { border-radius: 0.25rem; }
+              .rounded-lg { border-radius: 0.5rem; }
+              .rounded-xl { border-radius: 0.75rem; }
+              .rounded-t-2xl { border-top-left-radius: 1rem; border-top-right-radius: 1rem; }
+              .rounded-full { border-radius: 9999px; }
+              .bg-transparent { background-color: transparent; }
+              .outline-none { outline: 2px solid transparent; outline-offset: 2px; }
+              .overflow-hidden { overflow: hidden; }
+              .overflow-x-auto { overflow-x: auto; }
+              .overflow-y-auto { overflow-y: auto; }
+              .select-none { user-select: none; -webkit-user-select: none; }
+              .cursor-pointer { cursor: pointer; }
+              .pointer-events-none { pointer-events: none; }
+              .pointer-events-auto { pointer-events: auto; }
+              .transition { transition-property: color, background-color, border-color, opacity, transform; transition-duration: 150ms; }
+              .transition-all { transition-property: all; transition-duration: 150ms; }
+              .transform { transform: translateZ(0); }
+              .hover\\:opacity-75:hover { opacity: 0.75; }
+              .hover\\:opacity-80:hover { opacity: 0.8; }
+              .active\\:scale-95:active { transform: scale(0.95); }
+              @media (min-width: 640px) {
+                .sm\\:items-center { align-items: center; }
+                .sm\\:p-4 { padding: 1rem; }
+                .sm\\:rounded-2xl { border-radius: 1rem; }
+                .sm\\:h-\\[82vh\\] { height: 82vh; }
+              }
+                  """
+                  html = html.replace("  </style>", offline_css + chr(10) + "  </style>", 1)
+
+              if html.count("window.addEventListener(" + chr(39) + "DOMContentLoaded" + chr(39)) > 1:
+                  lines = html.splitlines()
+                  idx_960 = None
+                  idx_1528 = None
+                  idx_2103 = None
+                  for i, l in enumerate(lines):
+                      if "safeSetStorage(FONT_PREF_KEY, fontId);" in l and idx_960 is None:
+                          idx_960 = i + 1
+                      if "document.getElementById(" + chr(39) + "toggleDarkThemeBtn" + chr(39) + ").addEventListener(" + chr(39) + "click" + chr(39) + ", toggleTheme);" in l and idx_1528 is None:
+                          idx_1528 = i + 1
+                      if "document.getElementById(" + chr(39) + "insertTimestampBtn" + chr(39) + ").addEventListener(" in l:
+                          for j in range(i, min(i + 30, len(lines))):
+                              if "document.querySelectorAll(" + chr(39) + ".font-choice-btn" + chr(39) + ").forEach(btn => {" in lines[j]:
+                                  idx_2103 = j
+                                  break
+                  if idx_960 and idx_1528 and idx_2103 and idx_960 < idx_1528 < idx_2103:
+                      html = chr(10).join(lines[:idx_1528] + lines[idx_2103:])
+
+              html = html.replace(
+                  "document.getElementById(" + chr(39) + "insertTimestampBtn" + chr(39) + ").addEventListener(",
+                  "const _tsBtn = document.getElementById(" + chr(39) + "insertTimestampBtn" + chr(39) + "); if (_tsBtn) _tsBtn.addEventListener("
+              )
+              open(idx_path, "w", encoding="utf-8").write(html)
+
+          print("Verified Android NoActionBar, Offline Utility CSS, Auto-Theme Editorial Widget, and Signing Config.")
 
       - name: Generate & Verify Fresh Upload Keystore for Play Store Signing
         run: |
           cd _build_android/app
           rm -f upload-keystore.jks release-upload-keystore.jks
-          keytool -genkeypair -v \
-            -keystore upload-keystore.jks \
-            -storetype PKCS12 \
-            -alias upload \
-            -keyalg RSA \
-            -keysize 2048 \
-            -validity 10000 \
-            -storepass "trace_upload_2026" \
-            -keypass "trace_upload_2026" \
-            -dname "CN=muneebwanee, OU=Trace, O=Trace, L=Srinagar, S=JK, C=IN"
+          keytool -genkeypair -v -keystore upload-keystore.jks -storetype PKCS12 -alias upload -keyalg RSA -keysize 2048 -validity 10000 -storepass "trace_upload_2026" -keypass "trace_upload_2026" -dname "CN=muneebwanee, OU=Trace, O=Trace, L=Srinagar, S=JK, C=IN"
           keytool -list -v -keystore upload-keystore.jks -storepass "trace_upload_2026" -alias upload > /dev/null
           cp upload-keystore.jks release-upload-keystore.jks
 
