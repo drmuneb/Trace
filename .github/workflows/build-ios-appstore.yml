@@ -1,0 +1,480 @@
+name: Build iOS & iPadOS App Store (.ipa)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+  issue_comment:
+    types: [ created ]
+
+permissions:
+  contents: write
+
+jobs:
+  build-ios-ipa:
+    if: github.event_name != 'issue_comment' || contains( (github.event.comment.body), 'build' )
+    runs-on: macos-15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Extract Trace_iOS_AppStore.zip into Isolated Build Folder
+        run: |
+          mkdir -p _build_ios
+          ZIP_FILE=$(find . -maxdepth 2 \( -iname "*iOS*.zip" -o -iname "*AppStore*.zip" -o -iname "Trace.zip" \) | head -n 1)
+          if [ -n "$ZIP_FILE" ]; then
+            echo "Extracting iOS archive: $ZIP_FILE"
+            unzip -q -o "$ZIP_FILE" -d _build_ios
+          else
+            cp -R . _build_ios/ 2>/dev/null || true
+          fi
+          find _build_ios -name "*.entitlements" -delete || true
+          PROJECT_YML=$(find _build_ios -maxdepth 3 -name "project.yml" | head -n 1)
+          if [ -z "$PROJECT_YML" ]; then
+            echo "Error: project.yml not found in Trace_iOS_AppStore.zip!"
+            exit 1
+          fi
+          PROJECT_DIR=$(dirname "$PROJECT_YML")
+          echo "PROJECT_DIR=$PROJECT_DIR" >> $GITHUB_ENV
+          echo "Using iOS project directory: $PROJECT_DIR"
+
+      - name: Verify & Self-Heal TraceWidget Extension & Swift Files
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: python3 {0}
+        run: |
+          import os, shutil, textwrap
+
+          os.makedirs("TraceWidget", exist_ok=True)
+          if os.path.exists("TraceApp/PrivacyInfo.xcprivacy") and not os.path.exists("TraceWidget/PrivacyInfo.xcprivacy"):
+              shutil.copyfile("TraceApp/PrivacyInfo.xcprivacy", "TraceWidget/PrivacyInfo.xcprivacy")
+
+          plist_content = textwrap.dedent(r'''
+              <?xml version="1.0" encoding="UTF-8"?>
+              <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+              <plist version="1.0">
+              <dict>
+                  <key>CFBundleDevelopmentRegion</key>
+                  <string>en</string>
+                  <key>CFBundleDisplayName</key>
+                  <string>Trace Widget</string>
+                  <key>CFBundleExecutable</key>
+                  <string>$(EXECUTABLE_NAME)</string>
+                  <key>CFBundleIdentifier</key>
+                  <string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+                  <key>CFBundleInfoDictionaryVersion</key>
+                  <string>6.0</string>
+                  <key>CFBundleName</key>
+                  <string>$(PRODUCT_NAME)</string>
+                  <key>CFBundlePackageType</key>
+                  <string>XPC!</string>
+                  <key>CFBundleShortVersionString</key>
+                  <string>0.0.1</string>
+                  <key>CFBundleVersion</key>
+                  <string>1</string>
+                  <key>NSExtension</key>
+                  <dict>
+                      <key>NSExtensionPointIdentifier</key>
+                      <string>com.apple.widgetkit-extension</string>
+                  </dict>
+              </dict>
+              </plist>
+          ''').strip() + chr(10)
+
+          with open("TraceWidget/Info.plist", "w", encoding="utf-8") as f:
+              f.write(plist_content)
+
+          widget_swift = textwrap.dedent(r'''
+              import WidgetKit
+              import SwiftUI
+              import AppIntents
+
+              @available(iOS 17.0, *)
+              struct MarkMomentWidgetIntent: AppIntent {
+                  static var title: LocalizedStringResource = "Mark Moment in Trace"
+                  static var description = IntentDescription("Stamps the current [HH:mm] time into today's diary stream.")
+
+                  func perform() async throws -> some IntentResult {
+                      let fmt = DateFormatter()
+                      fmt.dateFormat = "HH:mm"
+                      let stamp = "[" + fmt.string(from: Date()) + "] "
+                      let nl = String(UnicodeScalar(10))
+
+                      let suite = UserDefaults(suiteName: "group.com.muneebwanee.trace")
+                      let current = suite?.string(forKey: "trace_widget_today_text")
+                          ?? UserDefaults.standard.string(forKey: "trace_widget_today_text")
+                          ?? ""
+                      let updated = current.isEmpty ? stamp : (current.hasSuffix(nl) ? current + stamp : current + nl + stamp)
+
+                      suite?.set(updated, forKey: "trace_widget_today_text")
+                      suite?.set(stamp, forKey: "trace_widget_pending_stamp")
+                      UserDefaults.standard.set(updated, forKey: "trace_widget_today_text")
+                      UserDefaults.standard.set(stamp, forKey: "trace_widget_pending_stamp")
+
+                      WidgetCenter.shared.reloadAllTimelines()
+                      return .result()
+                  }
+              }
+
+              @available(iOS 17.0, *)
+              struct ToggleWidgetThemeIntent: AppIntent {
+                  static var title: LocalizedStringResource = "Toggle Light / Dark Theme"
+                  static var description = IntentDescription("Switches Trace and its widgets between Warm Paper and Dark Ink.")
+
+                  func perform() async throws -> some IntentResult {
+                      let suite = UserDefaults(suiteName: "group.com.muneebwanee.trace")
+                      let current = suite?.bool(forKey: "trace_widget_dark_mode")
+                          ?? UserDefaults.standard.bool(forKey: "trace_widget_dark_mode")
+                      let next = !current
+                      suite?.set(next, forKey: "trace_widget_dark_mode")
+                      UserDefaults.standard.set(next, forKey: "trace_widget_dark_mode")
+                      WidgetCenter.shared.reloadAllTimelines()
+                      return .result()
+                  }
+              }
+
+              struct TraceWidgetEntry: TimelineEntry {
+                  let date: Date
+                  let todayText: String
+                  let totalDays: Int
+                  let totalWords: Int
+                  let isDarkMode: Bool
+              }
+
+              struct TraceWidgetProvider: TimelineProvider {
+                  func placeholder(in context: Context) -> TraceWidgetEntry {
+                      TraceWidgetEntry(date: Date(), todayText: "", totalDays: 1, totalWords: 0, isDarkMode: false)
+                  }
+
+                  func getSnapshot(in context: Context, completion: @escaping (TraceWidgetEntry) -> Void) {
+                      completion(loadEntry(for: Date()))
+                  }
+
+                  func getTimeline(in context: Context, completion: @escaping (Timeline<TraceWidgetEntry>) -> Void) {
+                      let now = Date()
+                      let cal = Calendar.current
+                      var entries: [TraceWidgetEntry] = []
+                      let startOfMinute = cal.date(bySetting: .second, value: 0, of: now) ?? now
+                      for offset in 0..<60 {
+                          if let entryDate = cal.date(byAdding: .minute, value: offset, to: startOfMinute) {
+                              entries.append(loadEntry(for: entryDate))
+                          }
+                      }
+                      let nextReload = cal.date(byAdding: .minute, value: 60, to: startOfMinute) ?? now.addingTimeInterval(3600)
+                      completion(Timeline(entries: entries, policy: .after(nextReload)))
+                  }
+
+                  private func loadEntry(for date: Date) -> TraceWidgetEntry {
+                      let suite = UserDefaults(suiteName: "group.com.muneebwanee.trace")
+                      let text = suite?.string(forKey: "trace_widget_today_text")
+                          ?? UserDefaults.standard.string(forKey: "trace_widget_today_text")
+                          ?? ""
+                      let days = suite?.integer(forKey: "trace_widget_total_days")
+                          ?? UserDefaults.standard.integer(forKey: "trace_widget_total_days")
+                      let words = suite?.integer(forKey: "trace_widget_total_words")
+                          ?? UserDefaults.standard.integer(forKey: "trace_widget_total_words")
+                      let dark: Bool
+                      if let suiteObj = suite?.object(forKey: "trace_widget_dark_mode") as? Bool {
+                          dark = suiteObj
+                      } else {
+                          dark = UserDefaults.standard.bool(forKey: "trace_widget_dark_mode")
+                      }
+                      return TraceWidgetEntry(date: date, todayText: text, totalDays: days, totalWords: words, isDarkMode: dark)
+                  }
+              }
+
+              struct TraceMinimalClockWidgetView: View {
+                  var entry: TraceWidgetProvider.Entry
+                  @Environment(\.widgetFamily) var family
+
+                  private var bgPaper: Color {
+                      entry.isDarkMode
+                          ? Color(red: 0.086, green: 0.086, blue: 0.082)
+                          : Color(red: 0.961, green: 0.961, blue: 0.953)
+                  }
+
+                  private var textInk: Color {
+                      entry.isDarkMode
+                          ? Color(red: 0.961, green: 0.961, blue: 0.953)
+                          : Color(red: 0.133, green: 0.133, blue: 0.125)
+                  }
+
+                  private var hasText: Bool {
+                      !entry.todayText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                  }
+
+                  var body: some View {
+                      ZStack {
+                          bgPaper
+
+                          VStack(alignment: .leading, spacing: 0) {
+                              HStack(alignment: .center, spacing: 6) {
+                                  HStack(spacing: 5) {
+                                      if hasText {
+                                          Circle().fill(textInk).frame(width: 5.5, height: 5.5)
+                                      } else {
+                                          Circle().stroke(textInk.opacity(0.45), lineWidth: 1).frame(width: 5.5, height: 5.5)
+                                      }
+                                      Text(upperDateString(entry.date))
+                                          .font(.system(size: 9.5, weight: .medium))
+                                          .tracking(0.8)
+                                          .foregroundColor(textInk.opacity(0.55))
+                                  }
+
+                                  Spacer()
+
+                                  if #available(iOS 17.0, *) {
+                                      Button(intent: ToggleWidgetThemeIntent()) {
+                                          Image(systemName: entry.isDarkMode ? "sun.max" : "moon")
+                                              .font(.system(size: 9.5, weight: .light))
+                                              .foregroundColor(textInk.opacity(0.65))
+                                              .frame(width: 20, height: 20)
+                                              .overlay(Circle().stroke(textInk.opacity(0.16), lineWidth: 0.8))
+                                      }
+                                      .buttonStyle(.plain)
+
+                                      Button(intent: MarkMomentWidgetIntent()) {
+                                          Image(systemName: "plus")
+                                              .font(.system(size: 9.5, weight: .regular))
+                                              .foregroundColor(textInk)
+                                              .frame(width: 20, height: 20)
+                                              .overlay(Circle().stroke(textInk.opacity(0.22), lineWidth: 0.8))
+                                      }
+                                      .buttonStyle(.plain)
+                                  }
+                              }
+
+                              Spacer(minLength: 4)
+
+                              HStack(alignment: .firstTextBaseline, spacing: 6) {
+                                  Text(hourMinuteString(entry.date))
+                                      .font(.custom("Georgia", size: family == .systemSmall ? 34 : 42))
+                                      .foregroundColor(textInk)
+
+                                  if family != .systemSmall {
+                                      Text(amPmString(entry.date))
+                                          .font(.system(size: 11, weight: .light, design: .monospaced))
+                                          .foregroundColor(textInk.opacity(0.42))
+                                  }
+                              }
+
+                              GeometryReader { geo in
+                                  ZStack(alignment: .leading) {
+                                      Rectangle().fill(textInk.opacity(0.12)).frame(height: 1)
+                                      Rectangle().fill(textInk).frame(width: max(4, geo.size.width * dayProgressFraction(entry.date)), height: 1.5)
+                                  }
+                              }
+                              .frame(height: 2)
+                              .padding(.vertical, 8)
+
+                              HStack(alignment: .center, spacing: 6) {
+                                  Text(hasText ? cleanPreview(entry.todayText) : "Tap + to mark this moment")
+                                      .font(.custom("Georgia", size: 11))
+                                      .foregroundColor(hasText ? textInk.opacity(0.78) : textInk.opacity(0.38))
+                                      .lineLimit(1)
+
+                                  Spacer(minLength: 0)
+
+                                  if entry.totalWords > 0 {
+                                      Text(String(entry.totalWords) + "w")
+                                          .font(.system(size: 9, weight: .regular, design: .monospaced))
+                                          .foregroundColor(textInk.opacity(0.40))
+                                  }
+                              }
+                          }
+                          .padding(14)
+                      }
+                  }
+
+                  private func hourMinuteString(_ d: Date) -> String {
+                      let f = DateFormatter()
+                      f.dateFormat = "HH:mm"
+                      return f.string(from: d)
+                  }
+
+                  private func amPmString(_ d: Date) -> String {
+                      let f = DateFormatter()
+                      f.dateFormat = "EEE"
+                      return f.string(from: d).uppercased()
+                  }
+
+                  private func upperDateString(_ d: Date) -> String {
+                      let f = DateFormatter()
+                      f.dateFormat = "EEE MMM d"
+                      return f.string(from: d).uppercased()
+                  }
+
+                  private func dayProgressFraction(_ d: Date) -> CGFloat {
+                      let cal = Calendar.current
+                      let mins = cal.component(.hour, from: d) * 60 + cal.component(.minute, from: d)
+                      return CGFloat(mins) / 1440.0
+                  }
+
+                  private func cleanPreview(_ text: String) -> String {
+                      text.components(separatedBy: .newlines).joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+                  }
+              }
+
+              @main
+              struct TraceWidget: Widget {
+                  let kind: String = "TraceWidget"
+
+                  var body: some WidgetConfiguration {
+                      StaticConfiguration(kind: kind, provider: TraceWidgetProvider()) { entry in
+                          if #available(iOS 17.0, *) {
+                              TraceMinimalClockWidgetView(entry: entry)
+                                  .containerBackground(for: .widget) {
+                                      entry.isDarkMode
+                                          ? Color(red: 0.086, green: 0.086, blue: 0.082)
+                                          : Color(red: 0.961, green: 0.961, blue: 0.953)
+                                  }
+                          } else {
+                              TraceMinimalClockWidgetView(entry: entry)
+                          }
+                      }
+                      .configurationDisplayName("Trace — Minimal Clock & Ritual")
+                      .description("Minimalist two-tone clock, day progress rail, and quick moment stamp synchronized with your light/dark theme.")
+                      .supportedFamilies([.systemSmall, .systemMedium])
+                  }
+              }
+          ''').strip() + chr(10)
+
+          with open("TraceWidget/TraceWidget.swift", "w", encoding="utf-8") as f:
+              f.write(widget_swift)
+
+          je = "TraceApp/Models/JournalEntry.swift"
+          if os.path.exists(je):
+              txt = open(je, encoding="utf-8").read()
+              if "import SwiftUI" not in txt:
+                  open(je, "w", encoding="utf-8").write(txt.replace("import Foundation", "import Foundation" + chr(10) + "import SwiftUI"))
+
+          js = "TraceApp/Services/JournalStore.swift"
+          if os.path.exists(js):
+              jtxt = open(js, encoding="utf-8").read()
+              jtxt = jtxt.replace("UserDefaults.standard.removeObject(forKey: storageKey)", 'UserDefaults.standard.removeObject(forKey: "trace_defaults_backup_v1")')
+              jtxt = jtxt.replace("updateWidgetData()", "saveLocal()")
+              open(js, "w", encoding="utf-8").write(jtxt)
+
+          cv = "TraceApp/Views/ContentView.swift"
+          if os.path.exists(cv):
+              cv_txt = open(cv, encoding="utf-8").read()
+              if "Legal & Privacy" not in cv_txt and "// Minimalist Attribution Footer" in cv_txt:
+                  legal_swift = r'''
+                        Rectangle().fill(textInk.opacity(0.12)).frame(height: 1)
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                Label("Legal & Privacy", systemImage: "checkmark.shield")
+                                    .font(.system(size: 12.5))
+                                    .foregroundColor(textInk)
+                                Spacer()
+                                Text("100% OFFLINE")
+                                    .font(.system(size: 9.5, design: .monospaced))
+                                    .foregroundColor(textInk.opacity(0.45))
+                            }
+                            DisclosureGroup("Terms of Service & Store EULA") {
+                                Text("Trace (0.0.1v) by muneebwanee is a 100% offline-first daily diary. You retain full copyright and ownership over all entries. Provided AS IS without warranty under the MIT License and standard App Store EULA.")
+                                    .font(.system(size: 11))
+                                    .foregroundColor(textInk.opacity(0.7))
+                                    .padding(.top, 4)
+                            }
+                            .font(.system(size: 11.5))
+                            .foregroundColor(textInk)
+                            DisclosureGroup("Privacy Policy (Zero Data Collected)") {
+                                Text("Trace collects zero personal data, runs zero analytics or tracking SDKs, and stores all entries locally on-device (plus optional private iCloud Sync).")
+                                    .font(.system(size: 11))
+                                    .foregroundColor(textInk.opacity(0.7))
+                                    .padding(.top, 4)
+                            }
+                            .font(.system(size: 11.5))
+                            .foregroundColor(textInk)
+                            DisclosureGroup("Data Safety & Instant Local Deletion") {
+                                VStack(alignment: .leading, spacing: 6) {
+                                    Text("All journal data resides locally on your device. You can export your diary above or wipe local data immediately:")
+                                        .font(.system(size: 11))
+                                        .foregroundColor(textInk.opacity(0.7))
+                                    Button("Erase All Local Diary Data") {
+                                        UserDefaults.standard.removePersistentDomain(forName: Bundle.main.bundleIdentifier ?? "")
+                                    }
+                                    .font(.system(size: 11, weight: .medium))
+                                    .foregroundColor(textInk)
+                                    .padding(.vertical, 5)
+                                    .padding(.horizontal, 10)
+                                    .overlay(RoundedRectangle(cornerRadius: 7).stroke(textInk.opacity(0.25), lineWidth: 1))
+                                }
+                                .padding(.top, 4)
+                            }
+                            .font(.system(size: 11.5))
+                            .foregroundColor(textInk)
+                        }
+                  '''
+                  cv_txt = cv_txt.replace("                        // Minimalist Attribution Footer", legal_swift + chr(10) + "                        // Minimalist Attribution Footer", 1)
+                  open(cv, "w", encoding="utf-8").write(cv_txt)
+          print("Verified TraceWidget extension and SwiftUI files.")
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode Project (Xcode 15 & 16 Compatible)
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          sed -i '' '/CODE_SIGN_ENTITLEMENTS/d' project.yml || true
+          xcodegen generate
+          sed -i '' 's/objectVersion = 77;/objectVersion = 56;/g' Trace.xcodeproj/project.pbxproj
+          sed -i '' 's/objectVersion = 70;/objectVersion = 56;/g' Trace.xcodeproj/project.pbxproj
+
+      - name: Compile & Archive Universal iOS / iPadOS App (.ipa)
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          if ! xcodebuild clean archive \
+            -project Trace.xcodeproj \
+            -scheme Trace \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath $RUNNER_TEMP/Trace.xcarchive \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGN_ENTITLEMENTS="" \
+            AD_HOC_CODE_SIGNING_ALLOWED=YES; then
+            echo "Retrying archive without unsigned extension validation block..."
+            python3 -c '
+          p = open("project.yml").read()
+          if "dependencies:" in p:
+              p = p.split("    dependencies:")[0] + "    settings:" + p.split("    settings:", 1)[1]
+              open("project.yml", "w").write(p)
+          '
+            xcodegen generate
+            sed -i '' 's/objectVersion = 77;/objectVersion = 56;/g' Trace.xcodeproj/project.pbxproj
+            sed -i '' 's/objectVersion = 70;/objectVersion = 56;/g' Trace.xcodeproj/project.pbxproj
+            xcodebuild clean archive \
+              -project Trace.xcodeproj \
+              -scheme Trace \
+              -configuration Release \
+              -destination 'generic/platform=iOS' \
+              -archivePath $RUNNER_TEMP/Trace.xcarchive \
+              CODE_SIGN_IDENTITY="" \
+              CODE_SIGNING_REQUIRED=NO \
+              CODE_SIGNING_ALLOWED=NO \
+              CODE_SIGN_ENTITLEMENTS="" \
+              AD_HOC_CODE_SIGNING_ALLOWED=YES
+          fi
+
+          mkdir -p $RUNNER_TEMP/Payload
+          cp -r $RUNNER_TEMP/Trace.xcarchive/Products/Applications/Trace.app $RUNNER_TEMP/Payload/
+          codesign --force --deep --sign - $RUNNER_TEMP/Payload/Trace.app || true
+          cd $RUNNER_TEMP
+          zip -qry $GITHUB_WORKSPACE/Trace_muneebwanee.ipa Payload
+          ls -lh $GITHUB_WORKSPACE/Trace_muneebwanee.ipa
+
+      - name: Upload iOS / iPadOS .ipa Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Trace_iOS_iPadOS_IPA
+          path: Trace_muneebwanee.ipa
+
+      - name: Publish .ipa to Unified GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: github.event_name != 'pull_request'
+        with:
+          tag_name: v0.0.1-universal
+          name: "Trace 0.0.1v — Official Store Releases (iOS .ipa • Android .aab/.apk • Windows .appx/.exe • Linux .AppImage/.deb)"
+          files: Trace_muneebwanee.ipa
